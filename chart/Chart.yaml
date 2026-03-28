@@ -1,0 +1,7 @@
+---
+apiVersion: v2
+name: maas-tokenizer
+description: MaaS Tokenizer - creates MaaS credential secrets in tenant namespaces
+type: application
+version: 0.1.0
+appVersion: latest

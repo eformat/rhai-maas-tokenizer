@@ -1,0 +1,41 @@
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "maas-tokenizer.fullname" . }}
+  labels:
+    {{- include "maas-tokenizer.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicas }}
+  selector:
+    matchLabels:
+      {{- include "maas-tokenizer.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "maas-tokenizer.selectorLabels" . | nindent 8 }}
+    spec:
+      serviceAccountName: {{ include "maas-tokenizer.serviceAccountName" . }}
+      containers:
+        - name: maas-tokenizer
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args:
+            - --token-expiry={{ .Values.tokenExpiry }}
+            - --reconcile-frequency={{ .Values.reconcileFrequency }}
+          env:
+            - name: MAAS_URL
+              value: {{ .Values.maasUrl | quote }}
+            - name: MAAS_TOKEN
+              value: {{ .Values.maasToken | quote }}
+            {{- if .Values.chatbotConfig }}
+            - name: CHATBOT_CONFIG
+              value: {{ .Values.chatbotConfig | toJson }}
+            {{- end }}
+          resources:
+            requests:
+              memory: "64Mi"
+              cpu: "50m"
+            limits:
+              memory: "128Mi"
+              cpu: "200m"

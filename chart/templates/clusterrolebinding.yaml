@@ -1,0 +1,15 @@
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "maas-tokenizer.fullname" . }}
+  labels:
+    {{- include "maas-tokenizer.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "maas-tokenizer.fullname" . }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "maas-tokenizer.serviceAccountName" . }}
+    namespace: {{ .Release.Namespace }}
