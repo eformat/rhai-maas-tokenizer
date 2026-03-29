@@ -221,12 +221,25 @@ func labelNamespaceDone(ctx context.Context, clientset kubernetes.Interface, nam
 	return nil
 }
 
-// isAlreadyProvisioned checks if all app namespaces for a tenant are labelled done
-// and their MaaS auth has not expired.
+// isAlreadyProvisioned checks if all app namespaces for a tenant are labelled done,
+// their MaaS auth has not expired, and the expected resources actually exist.
 func isAlreadyProvisioned(ctx context.Context, clientset kubernetes.Interface, tenantNS string) bool {
 	now := time.Now().UTC()
-	for _, prefix := range []string{"openwebui-", "multimodal-chat-"} {
-		ns, err := clientset.CoreV1().Namespaces().Get(ctx, prefix+tenantNS, metav1.GetOptions{})
+	tenantID := strings.TrimPrefix(tenantNS, "user-")
+
+	type appCheck struct {
+		prefix        string
+		secretName    string
+		configMapName string // optional
+	}
+	apps := []appCheck{
+		{"openwebui-", "openwebui-" + tenantID, "openwebui-" + tenantID},
+		{"multimodal-chat-", "multimodal-chatbot", ""},
+	}
+
+	for _, app := range apps {
+		nsName := app.prefix + tenantNS
+		ns, err := clientset.CoreV1().Namespaces().Get(ctx, nsName, metav1.GetOptions{})
 		if err != nil || ns.Labels[maasAuthLabel] != "done" {
 			return false
 		}
@@ -237,6 +250,14 @@ func isAlreadyProvisioned(ctx context.Context, clientset kubernetes.Interface, t
 		expiresAt, err := time.Parse(time.RFC3339, until)
 		if err != nil || now.After(expiresAt) {
 			return false
+		}
+		if _, err := clientset.CoreV1().Secrets(nsName).Get(ctx, app.secretName, metav1.GetOptions{}); err != nil {
+			return false
+		}
+		if app.configMapName != "" {
+			if _, err := clientset.CoreV1().ConfigMaps(nsName).Get(ctx, app.configMapName, metav1.GetOptions{}); err != nil {
+				return false
+			}
 		}
 	}
 	return true
