@@ -36,6 +36,7 @@ var (
 
 	tokenExpiry   string
 	reconcileFreq time.Duration
+	extraTokens   map[string]string
 )
 
 func parseExpiry(s string) (time.Duration, error) {
@@ -67,6 +68,13 @@ func main() {
 	maasToken = os.Getenv("MAAS_TOKEN")
 	if maasURL == "" || maasToken == "" {
 		log.Fatal("MAAS_URL and MAAS_TOKEN environment variables are required")
+	}
+
+	if raw := os.Getenv("EXTRA_TOKENS"); raw != "" {
+		if err := json.Unmarshal([]byte(raw), &extraTokens); err != nil {
+			log.Fatalf("Failed to parse EXTRA_TOKENS: %v", err)
+		}
+		log.Printf("Loaded %d extra token(s) for maas-secret", len(extraTokens))
 	}
 
 	log.Printf("MaaS tokenizer starting (url: %s, token-expiry: %s, reconcile: %s)", maasURL, tokenExpiry, reconcileFreq)
@@ -302,6 +310,10 @@ func buildSecretData(token string, models *maasModelsResponse) map[string][]byte
 	}
 	if len(modelURLs) > 0 {
 		data["api_base_urls"] = []byte(strings.Join(modelURLs, ";"))
+	}
+
+	for k, v := range extraTokens {
+		data[k] = []byte(v)
 	}
 
 	return data

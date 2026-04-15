@@ -14,3 +14,6 @@ reconcileFrequency: "10m"
 serviceAccount:
   create: true
   name: ""
+
+extraTokens:
+  stt-token: ""

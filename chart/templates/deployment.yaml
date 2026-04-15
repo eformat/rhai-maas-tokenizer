@@ -28,6 +28,10 @@ spec:
               value: {{ .Values.maasUrl | quote }}
             - name: MAAS_TOKEN
               value: {{ .Values.maasToken | quote }}
+            {{- if .Values.extraTokens }}
+            - name: EXTRA_TOKENS
+              value: {{ .Values.extraTokens | toJson | quote }}
+            {{- end }}
           resources:
             requests:
               memory: "64Mi"
