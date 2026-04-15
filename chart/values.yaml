@@ -15,7 +15,3 @@ appNamespaces: "demo,openclaw"
 serviceAccount:
   create: true
   name: ""
-
-route:
-  enabled: false
-  host: ""
