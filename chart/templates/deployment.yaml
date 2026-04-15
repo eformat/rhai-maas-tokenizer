@@ -28,10 +28,6 @@ spec:
               value: {{ .Values.maasUrl | quote }}
             - name: MAAS_TOKEN
               value: {{ .Values.maasToken | quote }}
-            {{- if .Values.appNamespaces }}
-            - name: APP_NAMESPACES
-              value: {{ .Values.appNamespaces | quote }}
-            {{- end }}
           resources:
             requests:
               memory: "64Mi"

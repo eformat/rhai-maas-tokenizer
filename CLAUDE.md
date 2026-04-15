@@ -4,19 +4,17 @@ A Go service that watches for tenant namespaces on an OpenShift cluster and prov
 
 ## How it works
 
-1. **Discovers tenant namespaces** — finds all Namespaces with the `tenant` label (e.g. `user-rvzm9`).
+1. **Discovers tenant namespaces** — finds all Namespaces with the `tenant` label (e.g. `user-x4ddm-demo`).
 
 2. **Obtains MaaS token** — calls `MAAS_URL/maas-api/v1/tokens` with the configured expiry, then `MAAS_URL/maas-api/v1/models` to discover available models.
 
-3. **Creates secrets in per-app namespaces** — each tenant has app namespaces following the pattern `{tenant-namespace}-{app-prefix}`:
-   - `{tenantNS}-demo`: Secret 'maas-secret'
-   - `{tenantNS}-openclaw`: Secret 'maas-secret'
+3. **Creates secrets in tenant namespaces** — creates a `maas-secret` Secret directly in each tenant namespace containing the API token and model URLs.
 
-4. **Labels app namespaces** — after provisioning, labels each app namespace `rhai-tmm.dev/maas-auth: done` and annotates with `rhai-tmm.dev/maas-auth-until` (UTC RFC3339 expiry time computed from `--token-expiry`).
+4. **Labels tenant namespaces** — after provisioning, labels each namespace `rhai-tmm.dev/maas-auth: done` and annotates with `rhai-tmm.dev/maas-auth-until` (UTC RFC3339 expiry time computed from `--token-expiry`).
 
-5. **Namespace watcher** — watches for namespaces with the `tenant` label and triggers immediate provisioning of their app namespaces.
+5. **Namespace watcher** — watches for namespaces with the `tenant` label and triggers immediate provisioning.
 
-6. **Periodic reconciliation** — re-runs every 10 minutes (configurable). Re-provisions any tenant whose app namespace tokens have expired (based on the `maas-auth-until` annotation) or are missing.
+6. **Periodic reconciliation** — re-runs every 10 minutes (configurable). Re-provisions any tenant namespace whose tokens have expired (based on the `maas-auth-until` annotation) or are missing.
 
 ## Configuration
 
@@ -24,7 +22,6 @@ A Go service that watches for tenant namespaces on an OpenShift cluster and prov
 
 - `MAAS_URL` — MaaS API base URL (e.g. `https://maas.apps.example.com`)
 - `MAAS_TOKEN` — MaaS user token for authentication
-- `APP_NAMESPACES` — comma-separated list of app namespace suffixes (default `demo,openclaw`). Each tenant gets `{tenantNS}-{suffix}` namespaces provisioned.
 
 ### Command-line flags
 
@@ -52,7 +49,6 @@ maasUrl: ""                      # Required — MaaS API base URL
 maasToken: ""                    # Required — MaaS user token
 tokenExpiry: "8h"                # MaaS token expiration
 reconcileFrequency: "10m"        # Reconciliation interval
-appNamespaces: "demo,openclaw"   # Comma-separated app namespace suffixes
 ```
 
 ### RBAC

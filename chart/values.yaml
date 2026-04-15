@@ -10,7 +10,6 @@ maasUrl: ""
 maasToken: ""
 tokenExpiry: "24h"
 reconcileFrequency: "10m"
-appNamespaces: "demo,openclaw"
 
 serviceAccount:
   create: true

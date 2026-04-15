@@ -38,8 +38,6 @@ var (
 	reconcileFreq time.Duration
 )
 
-var appSuffixes []string
-
 func parseExpiry(s string) (time.Duration, error) {
 	if strings.HasSuffix(s, "d") {
 		days, err := strconv.Atoi(strings.TrimSuffix(s, "d"))
@@ -71,21 +69,7 @@ func main() {
 		log.Fatal("MAAS_URL and MAAS_TOKEN environment variables are required")
 	}
 
-	appNS := os.Getenv("APP_NAMESPACES")
-	if appNS == "" {
-		appNS = "demo,openclaw"
-	}
-	for _, s := range strings.Split(appNS, ",") {
-		s = strings.TrimSpace(s)
-		if s != "" {
-			appSuffixes = append(appSuffixes, s)
-		}
-	}
-	if len(appSuffixes) == 0 {
-		log.Fatal("APP_NAMESPACES must contain at least one suffix")
-	}
-
-	log.Printf("MaaS tokenizer starting (url: %s, token-expiry: %s, reconcile: %s, app-namespaces: %s)", maasURL, tokenExpiry, reconcileFreq, strings.Join(appSuffixes, ","))
+	log.Printf("MaaS tokenizer starting (url: %s, token-expiry: %s, reconcile: %s)", maasURL, tokenExpiry, reconcileFreq)
 
 	config, err := buildKubeConfig()
 	if err != nil {
@@ -201,48 +185,25 @@ func runNamespaceWatch(ctx context.Context, clientset kubernetes.Interface) erro
 	}
 }
 
-func labelNamespaceDone(ctx context.Context, clientset kubernetes.Interface, namespace string, expiresAt time.Time) error {
-	ns, err := clientset.CoreV1().Namespaces().Get(ctx, namespace, metav1.GetOptions{})
-	if err != nil {
-		return err
-	}
-	if ns.Labels == nil {
-		ns.Labels = make(map[string]string)
-	}
-	ns.Labels[maasAuthLabel] = "done"
-	if ns.Annotations == nil {
-		ns.Annotations = make(map[string]string)
-	}
-	ns.Annotations[maasAuthUntilAnnotation] = expiresAt.Format(time.RFC3339)
-	if _, err := clientset.CoreV1().Namespaces().Update(ctx, ns, metav1.UpdateOptions{}); err != nil {
-		return err
-	}
-	log.Printf("Labelled namespace %s with %s=done (until %s)", namespace, maasAuthLabel, expiresAt.Format(time.RFC3339))
-	return nil
-}
-
-// isAlreadyProvisioned checks if all app namespaces for a tenant are labelled done,
-// their MaaS auth has not expired, and the expected secrets exist.
-func isAlreadyProvisioned(ctx context.Context, clientset kubernetes.Interface, tenantNS string) bool {
+// isAlreadyProvisioned checks if a tenant namespace is labelled done,
+// its MaaS auth has not expired, and the maas-secret exists.
+func isAlreadyProvisioned(ctx context.Context, clientset kubernetes.Interface, namespace string) bool {
 	now := time.Now().UTC()
 
-	for _, suffix := range appSuffixes {
-		nsName := tenantNS + "-" + suffix
-		ns, err := clientset.CoreV1().Namespaces().Get(ctx, nsName, metav1.GetOptions{})
-		if err != nil || ns.Labels[maasAuthLabel] != "done" {
-			return false
-		}
-		until := ns.Annotations[maasAuthUntilAnnotation]
-		if until == "" {
-			return false
-		}
-		expiresAt, err := time.Parse(time.RFC3339, until)
-		if err != nil || now.After(expiresAt) {
-			return false
-		}
-		if _, err := clientset.CoreV1().Secrets(nsName).Get(ctx, "maas-secret", metav1.GetOptions{}); err != nil {
-			return false
-		}
+	ns, err := clientset.CoreV1().Namespaces().Get(ctx, namespace, metav1.GetOptions{})
+	if err != nil || ns.Labels[maasAuthLabel] != "done" {
+		return false
+	}
+	until := ns.Annotations[maasAuthUntilAnnotation]
+	if until == "" {
+		return false
+	}
+	expiresAt, err := time.Parse(time.RFC3339, until)
+	if err != nil || now.After(expiresAt) {
+		return false
+	}
+	if _, err := clientset.CoreV1().Secrets(namespace).Get(ctx, "maas-secret", metav1.GetOptions{}); err != nil {
+		return false
 	}
 	return true
 }
@@ -290,35 +251,46 @@ func reconcileAllTenants(ctx context.Context, clientset kubernetes.Interface) {
 	log.Println("Reconciliation complete")
 }
 
-// provisionNamespace creates a maas-secret in each app namespace for a tenant and labels each done.
-// App namespaces follow the pattern {tenantNS}-{suffix}:
-//   - {tenantNS}-demo:    Secret 'maas-secret'
-//   - {tenantNS}-openclaw: Secret 'maas-secret'
-func provisionNamespace(ctx context.Context, clientset kubernetes.Interface, tenantNS, token string, models *maasModelsResponse, expiresAt time.Time) error {
+// provisionNamespace creates a maas-secret directly in the tenant namespace and labels it done.
+func provisionNamespace(ctx context.Context, clientset kubernetes.Interface, namespace, token string, models *maasModelsResponse, expiresAt time.Time) error {
 	managedLabels := map[string]string{
 		"app.kubernetes.io/managed-by": "maas-tokenizer",
-		"tenant.name":                 tenantNS,
 	}
 
 	secretData := buildSecretData(token, models)
 
-	for _, suffix := range appSuffixes {
-		appNS := tenantNS + "-" + suffix
-
-		if err := upsertSecret(ctx, clientset, appNS, "maas-secret", secretData, managedLabels); err != nil {
-			return fmt.Errorf("maas-secret in %s: %w", appNS, err)
-		}
-
-		if err := labelNamespaceDone(ctx, clientset, appNS, expiresAt); err != nil {
-			return fmt.Errorf("labelling namespace %s: %w", appNS, err)
-		}
+	if err := upsertSecret(ctx, clientset, namespace, "maas-secret", secretData, managedLabels); err != nil {
+		return fmt.Errorf("maas-secret in %s: %w", namespace, err)
 	}
 
-	log.Printf("[%s] MaaS credentials provisioned (%s)", tenantNS, strings.Join(appSuffixes, ", "))
+	if err := labelNamespaceDone(ctx, clientset, namespace, expiresAt); err != nil {
+		return fmt.Errorf("labelling namespace %s: %w", namespace, err)
+	}
+
+	log.Printf("[%s] MaaS credentials provisioned", namespace)
 	return nil
 }
 
-// buildSecretData creates the data map for the maas-secret.
+func labelNamespaceDone(ctx context.Context, clientset kubernetes.Interface, namespace string, expiresAt time.Time) error {
+	ns, err := clientset.CoreV1().Namespaces().Get(ctx, namespace, metav1.GetOptions{})
+	if err != nil {
+		return err
+	}
+	if ns.Labels == nil {
+		ns.Labels = make(map[string]string)
+	}
+	ns.Labels[maasAuthLabel] = "done"
+	if ns.Annotations == nil {
+		ns.Annotations = make(map[string]string)
+	}
+	ns.Annotations[maasAuthUntilAnnotation] = expiresAt.Format(time.RFC3339)
+	if _, err := clientset.CoreV1().Namespaces().Update(ctx, ns, metav1.UpdateOptions{}); err != nil {
+		return err
+	}
+	log.Printf("Labelled namespace %s with %s=done (until %s)", namespace, maasAuthLabel, expiresAt.Format(time.RFC3339))
+	return nil
+}
+
 func buildSecretData(token string, models *maasModelsResponse) map[string][]byte {
 	data := map[string][]byte{
 		"token": []byte(token),
