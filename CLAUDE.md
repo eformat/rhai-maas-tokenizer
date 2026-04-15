@@ -8,9 +8,9 @@ A Go service that watches for tenant namespaces on an OpenShift cluster and prov
 
 2. **Obtains MaaS token** — calls `MAAS_URL/maas-api/v1/tokens` with the configured expiry, then `MAAS_URL/maas-api/v1/models` to discover available models.
 
-3. **Creates secrets in per-app namespaces** — each tenant has app namespaces following the pattern `{app-prefix}-{tenant-namespace}`:
-   - `openwebui-{tenantNS}`: ConfigMap `chat-openwebui` with `OPENAI_API_BASE_URLS`, Secret `chat-openwebui` with `OPENAI_API_KEYS`
-   - `multimodal-chat-{tenantNS}`: Secret `multimodal-chatbot` with `config.json` (from `CHATBOT_CONFIG` template with MaaS model matching)
+3. **Creates secrets in per-app namespaces** — each tenant has app namespaces following the pattern `{tenant-namespace}-{app-prefix}`:
+   - `{tenantNS}-demo`: Secret 'maas-secret'
+   - `{tenantNS}-openclaw`: Secret 'maas-secret'
 
 4. **Labels app namespaces** — after provisioning, labels each app namespace `rhai-tmm.dev/maas-auth: done` and annotates with `rhai-tmm.dev/maas-auth-until` (UTC RFC3339 expiry time computed from `--token-expiry`).
 
@@ -24,10 +24,7 @@ A Go service that watches for tenant namespaces on an OpenShift cluster and prov
 
 - `MAAS_URL` — MaaS API base URL (e.g. `https://maas.apps.example.com`)
 - `MAAS_TOKEN` — MaaS user token for authentication
-
-### Optional environment variables
-
-- `CHATBOT_CONFIG` — JSON template for the multimodal-chatbot `config.json`. MaaS model endpoints and tokens are filled in by matching `model_name` fields against MaaS API responses.
+- `APP_NAMESPACES` — comma-separated list of app namespace suffixes (default `demo,openclaw`). Each tenant gets `{tenantNS}-{suffix}` namespaces provisioned.
 
 ### Command-line flags
 
@@ -55,7 +52,7 @@ maasUrl: ""                      # Required — MaaS API base URL
 maasToken: ""                    # Required — MaaS user token
 tokenExpiry: "8h"                # MaaS token expiration
 reconcileFrequency: "10m"        # Reconciliation interval
-chatbotConfig: ""                # Optional — JSON template for multimodal-chatbot config.json
+appNamespaces: "demo,openclaw"   # Comma-separated app namespace suffixes
 ```
 
 ### RBAC
@@ -64,5 +61,3 @@ The chart creates a ClusterRole with:
 
 - `namespaces` — get, list, watch, update, patch
 - `secrets` — get, list, create, update, patch
-- `configmaps` — get, list, create, update, patch
-- `pods` — list, delete

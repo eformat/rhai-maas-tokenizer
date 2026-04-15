@@ -34,12 +34,12 @@ var (
 	maasURL   string
 	maasToken string
 
-	tokenExpiry       string
-	reconcileFreq     time.Duration
-	chatbotConfigJSON string
+	tokenExpiry   string
+	reconcileFreq time.Duration
 )
 
-// parseExpiry parses a duration string like "8h", "30m", or "1d" into a time.Duration.
+var appSuffixes []string
+
 func parseExpiry(s string) (time.Duration, error) {
 	if strings.HasSuffix(s, "d") {
 		days, err := strconv.Atoi(strings.TrimSuffix(s, "d"))
@@ -51,8 +51,6 @@ func parseExpiry(s string) (time.Duration, error) {
 	return time.ParseDuration(s)
 }
 
-// computeExpiresAt returns the UTC time when the current token expiry will elapse.
-// Falls back to 8h if the expiry string cannot be parsed.
 func computeExpiresAt() time.Time {
 	d, err := parseExpiry(tokenExpiry)
 	if err != nil {
@@ -73,12 +71,21 @@ func main() {
 		log.Fatal("MAAS_URL and MAAS_TOKEN environment variables are required")
 	}
 
-	chatbotConfigJSON = os.Getenv("CHATBOT_CONFIG")
-	if chatbotConfigJSON != "" {
-		log.Printf("CHATBOT_CONFIG template loaded for multimodal-chatbot config.json")
+	appNS := os.Getenv("APP_NAMESPACES")
+	if appNS == "" {
+		appNS = "demo,openclaw"
+	}
+	for _, s := range strings.Split(appNS, ",") {
+		s = strings.TrimSpace(s)
+		if s != "" {
+			appSuffixes = append(appSuffixes, s)
+		}
+	}
+	if len(appSuffixes) == 0 {
+		log.Fatal("APP_NAMESPACES must contain at least one suffix")
 	}
 
-	log.Printf("MaaS tokenizer starting (url: %s, token-expiry: %s, reconcile: %s)", maasURL, tokenExpiry, reconcileFreq)
+	log.Printf("MaaS tokenizer starting (url: %s, token-expiry: %s, reconcile: %s, app-namespaces: %s)", maasURL, tokenExpiry, reconcileFreq, strings.Join(appSuffixes, ","))
 
 	config, err := buildKubeConfig()
 	if err != nil {
@@ -101,13 +108,10 @@ func main() {
 		cancel()
 	}()
 
-	// Initial reconciliation
 	reconcileAllTenants(ctx, clientset)
 
-	// Start namespace watcher in background
 	go watchNamespaces(ctx, clientset)
 
-	// Periodic reconciliation
 	ticker := time.NewTicker(reconcileFreq)
 	defer ticker.Stop()
 
@@ -135,9 +139,6 @@ func buildKubeConfig() (*rest.Config, error) {
 	return clientcmd.BuildConfigFromFlags("", kubeconfigPath)
 }
 
-// watchNamespaces watches for new/modified namespaces with tenant labels and
-// provisions MaaS secrets immediately, without waiting for the reconcile ticker.
-// Automatically reconnects on watch errors.
 func watchNamespaces(ctx context.Context, clientset kubernetes.Interface) {
 	for {
 		if ctx.Err() != nil {
@@ -191,10 +192,9 @@ func runNamespaceWatch(ctx context.Context, clientset kubernetes.Interface) erro
 				log.Printf("[watch] Error getting MaaS token/models for %s: %v", ns.Name, err)
 				continue
 			}
-			apiBaseURLs, apiKeys := buildModelData(token, models)
 			expiresAt := computeExpiresAt()
 
-			if err := provisionNamespace(ctx, clientset, ns.Name, token, models, apiBaseURLs, apiKeys, expiresAt); err != nil {
+			if err := provisionNamespace(ctx, clientset, ns.Name, token, models, expiresAt); err != nil {
 				log.Printf("[watch] Error provisioning %s: %v", ns.Name, err)
 			}
 		}
@@ -222,23 +222,12 @@ func labelNamespaceDone(ctx context.Context, clientset kubernetes.Interface, nam
 }
 
 // isAlreadyProvisioned checks if all app namespaces for a tenant are labelled done,
-// their MaaS auth has not expired, and the expected resources actually exist.
+// their MaaS auth has not expired, and the expected secrets exist.
 func isAlreadyProvisioned(ctx context.Context, clientset kubernetes.Interface, tenantNS string) bool {
 	now := time.Now().UTC()
-	tenantID := strings.TrimPrefix(tenantNS, "user-")
 
-	type appCheck struct {
-		prefix        string
-		secretName    string
-		configMapName string // optional
-	}
-	apps := []appCheck{
-		{"openwebui-", "openwebui-" + tenantID, "openwebui-" + tenantID},
-		{"multimodal-chat-", "multimodal-chatbot", ""},
-	}
-
-	for _, app := range apps {
-		nsName := app.prefix + tenantNS
+	for _, suffix := range appSuffixes {
+		nsName := tenantNS + "-" + suffix
 		ns, err := clientset.CoreV1().Namespaces().Get(ctx, nsName, metav1.GetOptions{})
 		if err != nil || ns.Labels[maasAuthLabel] != "done" {
 			return false
@@ -251,20 +240,13 @@ func isAlreadyProvisioned(ctx context.Context, clientset kubernetes.Interface, t
 		if err != nil || now.After(expiresAt) {
 			return false
 		}
-		if _, err := clientset.CoreV1().Secrets(nsName).Get(ctx, app.secretName, metav1.GetOptions{}); err != nil {
+		if _, err := clientset.CoreV1().Secrets(nsName).Get(ctx, "maas-secret", metav1.GetOptions{}); err != nil {
 			return false
-		}
-		if app.configMapName != "" {
-			if _, err := clientset.CoreV1().ConfigMaps(nsName).Get(ctx, app.configMapName, metav1.GetOptions{}); err != nil {
-				return false
-			}
 		}
 	}
 	return true
 }
 
-// reconcileAllTenants finds all namespaces with the "tenant" label and provisions MaaS secrets
-// into their per-app namespaces.
 func reconcileAllTenants(ctx context.Context, clientset kubernetes.Interface) {
 	log.Println("Reconciling all tenants...")
 
@@ -296,12 +278,11 @@ func reconcileAllTenants(ctx context.Context, clientset kubernetes.Interface) {
 		return
 	}
 
-	apiBaseURLs, apiKeys := buildModelData(token, models)
-	log.Printf("Found %d model(s): %s", len(models.Data), apiBaseURLs)
+	log.Printf("Found %d model(s)", len(models.Data))
 	expiresAt := computeExpiresAt()
 
 	for _, nsName := range unprovisioned {
-		if err := provisionNamespace(ctx, clientset, nsName, token, models, apiBaseURLs, apiKeys, expiresAt); err != nil {
+		if err := provisionNamespace(ctx, clientset, nsName, token, models, expiresAt); err != nil {
 			log.Printf("[%s] Error provisioning: %v", nsName, err)
 		}
 	}
@@ -309,137 +290,49 @@ func reconcileAllTenants(ctx context.Context, clientset kubernetes.Interface) {
 	log.Println("Reconciliation complete")
 }
 
-// provisionNamespace creates MaaS secrets in per-app namespaces for a tenant and labels each done.
-// App namespaces follow the pattern {app-prefix}-{tenantNS}:
-//   - openwebui-{tenantNS}:       chat-openwebui ConfigMap + Secret
-//   - multimodal-chat-{tenantNS}: multimodal-chatbot Secret
-func provisionNamespace(ctx context.Context, clientset kubernetes.Interface, tenantNS, token string, models *maasModelsResponse, apiBaseURLs, apiKeys string, expiresAt time.Time) error {
+// provisionNamespace creates a maas-secret in each app namespace for a tenant and labels each done.
+// App namespaces follow the pattern {tenantNS}-{suffix}:
+//   - {tenantNS}-demo:    Secret 'maas-secret'
+//   - {tenantNS}-openclaw: Secret 'maas-secret'
+func provisionNamespace(ctx context.Context, clientset kubernetes.Interface, tenantNS, token string, models *maasModelsResponse, expiresAt time.Time) error {
 	managedLabels := map[string]string{
 		"app.kubernetes.io/managed-by": "maas-tokenizer",
 		"tenant.name":                 tenantNS,
 	}
 
-	// --- openwebui-{tenantNS} ---
-	openwebuiNS := "openwebui-" + tenantNS
-	tenantID := strings.TrimPrefix(tenantNS, "user-")
-	openwebuiResourceName := "openwebui-" + tenantID
+	secretData := buildSecretData(token, models)
 
-	if err := upsertConfigMap(ctx, clientset, openwebuiNS, openwebuiResourceName, map[string]string{
-		"OPENAI_API_BASE_URLS": apiBaseURLs,
-	}, managedLabels); err != nil {
-		return fmt.Errorf("%s configmap in %s: %w", openwebuiResourceName, openwebuiNS, err)
+	for _, suffix := range appSuffixes {
+		appNS := tenantNS + "-" + suffix
+
+		if err := upsertSecret(ctx, clientset, appNS, "maas-secret", secretData, managedLabels); err != nil {
+			return fmt.Errorf("maas-secret in %s: %w", appNS, err)
+		}
+
+		if err := labelNamespaceDone(ctx, clientset, appNS, expiresAt); err != nil {
+			return fmt.Errorf("labelling namespace %s: %w", appNS, err)
+		}
 	}
 
-	if err := upsertSecret(ctx, clientset, openwebuiNS, openwebuiResourceName, map[string][]byte{
-		"OPENAI_API_KEYS": []byte(apiKeys),
-	}, managedLabels); err != nil {
-		return fmt.Errorf("%s secret in %s: %w", openwebuiResourceName, openwebuiNS, err)
-	}
-
-	if err := labelNamespaceDone(ctx, clientset, openwebuiNS, expiresAt); err != nil {
-		return fmt.Errorf("labelling namespace %s: %w", openwebuiNS, err)
-	}
-
-	restartPods(ctx, clientset, openwebuiNS, "app.kubernetes.io/name=openwebui")
-
-	// --- multimodal-chat-{tenantNS} ---
-	multimodalChatNS := "multimodal-chat-" + tenantNS
-
-	if err := upsertMultimodalChatbotSecret(ctx, clientset, tenantNS, multimodalChatNS, token, models, managedLabels); err != nil {
-		return fmt.Errorf("multimodal-chatbot secret in %s: %w", multimodalChatNS, err)
-	}
-
-	if err := labelNamespaceDone(ctx, clientset, multimodalChatNS, expiresAt); err != nil {
-		return fmt.Errorf("labelling namespace %s: %w", multimodalChatNS, err)
-	}
-
-	restartPods(ctx, clientset, multimodalChatNS, "app=multimodal-chatbot")
-
-	log.Printf("[%s] MaaS credentials provisioned (openwebui + multimodal-chat)", tenantNS)
+	log.Printf("[%s] MaaS credentials provisioned (%s)", tenantNS, strings.Join(appSuffixes, ", "))
 	return nil
 }
 
-// restartPods deletes pods matching a label selector in a namespace so they pick up secret changes.
-func restartPods(ctx context.Context, clientset kubernetes.Interface, namespace, labelSelector string) {
-	pods, err := clientset.CoreV1().Pods(namespace).List(ctx, metav1.ListOptions{
-		LabelSelector: labelSelector,
-	})
-	if err != nil {
-		log.Printf("[%s] Warning: failed to list pods (%s): %v", namespace, labelSelector, err)
-		return
-	}
-	for _, pod := range pods.Items {
-		if err := clientset.CoreV1().Pods(namespace).Delete(ctx, pod.Name, metav1.DeleteOptions{}); err != nil && !k8serrors.IsNotFound(err) {
-			log.Printf("[%s] Warning: failed to delete pod %s: %v", namespace, pod.Name, err)
-		} else {
-			log.Printf("[%s] Deleted pod %s for restart", namespace, pod.Name)
-		}
-	}
-}
-
-// upsertMultimodalChatbotSecret creates/updates the multimodal-chatbot secret.
-// Uses CHATBOT_CONFIG as a template and fills in MaaS model endpoints and tokens.
-// If CHATBOT_CONFIG is not set, creates the secret with an empty config.json.
-func upsertMultimodalChatbotSecret(ctx context.Context, clientset kubernetes.Interface, tenantName, namespace, token string, models *maasModelsResponse, labels map[string]string) error {
-	if chatbotConfigJSON == "" {
-		log.Printf("[%s] CHATBOT_CONFIG not set, creating multimodal-chatbot with empty config.json", tenantName)
-		return upsertSecret(ctx, clientset, namespace, "multimodal-chatbot", map[string][]byte{
-			"config.json": []byte("{}"),
-		}, labels)
+// buildSecretData creates the data map for the maas-secret.
+func buildSecretData(token string, models *maasModelsResponse) map[string][]byte {
+	data := map[string][]byte{
+		"token": []byte(token),
 	}
 
-	type llmEntry struct {
-		Name              string  `json:"name"`
-		InferenceEndpoint string  `json:"inference_endpoint"`
-		APIKey            string  `json:"api_key"`
-		ModelName         string  `json:"model_name"`
-		MaxTokens         int     `json:"max_tokens"`
-		Temperature       float64 `json:"temperature"`
-		TopP              float64 `json:"top_p"`
-		PresencePenalty   float64 `json:"presence_penalty"`
-		SupportsVision    bool    `json:"supports_vision"`
-	}
-	type chatbotConfig struct {
-		SystemTemplate          string     `json:"system_template"`
-		TranslateSystemTemplate string     `json:"translate_system_template"`
-		LLMs                    []llmEntry `json:"llms"`
-	}
-
-	var cbConfig chatbotConfig
-	if err := json.Unmarshal([]byte(chatbotConfigJSON), &cbConfig); err != nil {
-		return fmt.Errorf("parsing CHATBOT_CONFIG: %w", err)
-	}
-
-	// Build MaaS model_name -> URL lookup
-	maasModels := make(map[string]string)
+	var modelURLs []string
 	for _, m := range models.Data {
-		trimmed := strings.TrimRight(m.URL, "/")
-		if lastSlash := strings.LastIndex(trimmed, "/"); lastSlash >= 0 {
-			modelName := trimmed[lastSlash+1:]
-			maasModels[modelName] = m.URL + "/v1"
-		}
+		modelURLs = append(modelURLs, m.URL+"/v1")
+	}
+	if len(modelURLs) > 0 {
+		data["api_base_urls"] = []byte(strings.Join(modelURLs, ";"))
 	}
 
-	// Fill in inference_endpoint and api_key for matching MaaS models
-	updated := 0
-	for i := range cbConfig.LLMs {
-		if endpoint, exists := maasModels[cbConfig.LLMs[i].ModelName]; exists {
-			cbConfig.LLMs[i].InferenceEndpoint = endpoint
-			cbConfig.LLMs[i].APIKey = token
-			updated++
-			log.Printf("[%s] Matched MaaS model %q -> %s", tenantName, cbConfig.LLMs[i].ModelName, endpoint)
-		}
-	}
-	log.Printf("[%s] multimodal-chatbot: %d/%d models matched from MaaS", tenantName, updated, len(cbConfig.LLMs))
-
-	configJSON, err := json.MarshalIndent(cbConfig, "", "    ")
-	if err != nil {
-		return fmt.Errorf("marshalling config.json: %w", err)
-	}
-
-	return upsertSecret(ctx, clientset, namespace, "multimodal-chatbot", map[string][]byte{
-		"config.json": configJSON,
-	}, labels)
+	return data
 }
 
 type maasModelsResponse struct {
@@ -521,58 +414,6 @@ func getMaaSTokenAndModels(ctx context.Context) (string, *maasModelsResponse, er
 	return tokenResp.Token, &models, nil
 }
 
-func buildModelData(token string, models *maasModelsResponse) (string, string) {
-	var modelURLs []string
-	var modelTokens []string
-	for _, m := range models.Data {
-		modelURLs = append(modelURLs, m.URL+"/v1")
-		modelTokens = append(modelTokens, token)
-	}
-	return strings.Join(modelURLs, ";"), strings.Join(modelTokens, ";")
-}
-
-
-// upsertConfigMap creates or updates a ConfigMap.
-func upsertConfigMap(ctx context.Context, clientset kubernetes.Interface, namespace, name string, data map[string]string, labels map[string]string) error {
-	cm, err := clientset.CoreV1().ConfigMaps(namespace).Get(ctx, name, metav1.GetOptions{})
-	if k8serrors.IsNotFound(err) {
-		cm = &corev1.ConfigMap{
-			ObjectMeta: metav1.ObjectMeta{
-				Name:      name,
-				Namespace: namespace,
-				Labels:    labels,
-			},
-			Data: data,
-		}
-		if _, err := clientset.CoreV1().ConfigMaps(namespace).Create(ctx, cm, metav1.CreateOptions{}); err != nil {
-			return err
-		}
-		log.Printf("Created configmap %s in %s", name, namespace)
-		return nil
-	}
-	if err != nil {
-		return err
-	}
-	if cm.Data == nil {
-		cm.Data = make(map[string]string)
-	}
-	for k, v := range data {
-		cm.Data[k] = v
-	}
-	if cm.Labels == nil {
-		cm.Labels = make(map[string]string)
-	}
-	for k, v := range labels {
-		cm.Labels[k] = v
-	}
-	if _, err := clientset.CoreV1().ConfigMaps(namespace).Update(ctx, cm, metav1.UpdateOptions{}); err != nil {
-		return err
-	}
-	log.Printf("Updated configmap %s in %s", name, namespace)
-	return nil
-}
-
-// upsertSecret creates or updates a Secret.
 func upsertSecret(ctx context.Context, clientset kubernetes.Interface, namespace, name string, data map[string][]byte, labels map[string]string) error {
 	secret, err := clientset.CoreV1().Secrets(namespace).Get(ctx, name, metav1.GetOptions{})
 	if k8serrors.IsNotFound(err) {
