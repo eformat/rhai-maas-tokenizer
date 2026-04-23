@@ -16,6 +16,8 @@ A Go service that watches for tenant namespaces on an OpenShift cluster and prov
 
 6. **Periodic reconciliation** — re-runs every 10 minutes (configurable). Re-provisions any tenant namespace whose tokens have expired (based on the `maas-auth-until` annotation) or are missing.
 
+7. **Deployment rollout restart** — after provisioning a secret, restarts any Deployments in the tenant namespace that carry the label `rhai-tmm.dev/reloader: "true"`. This ensures pods pick up the refreshed credentials.
+
 ## Configuration
 
 ### Required environment variables
@@ -57,3 +59,4 @@ The chart creates a ClusterRole with:
 
 - `namespaces` — get, list, watch, update, patch
 - `secrets` — get, list, create, update, patch
+- `deployments` (apps) — get, list, patch

@@ -19,6 +19,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/watch"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
@@ -28,6 +29,7 @@ import (
 const (
 	maasAuthLabel           = "rhai-tmm.dev/maas-auth"
 	maasAuthUntilAnnotation = "rhai-tmm.dev/maas-auth-until"
+	reloaderLabel           = "rhai-tmm.dev/reloader"
 )
 
 var (
@@ -271,12 +273,34 @@ func provisionNamespace(ctx context.Context, clientset kubernetes.Interface, nam
 		return fmt.Errorf("maas-secret in %s: %w", namespace, err)
 	}
 
+	restartDeployments(ctx, clientset, namespace)
+
 	if err := labelNamespaceDone(ctx, clientset, namespace, expiresAt); err != nil {
 		return fmt.Errorf("labelling namespace %s: %w", namespace, err)
 	}
 
 	log.Printf("[%s] MaaS credentials provisioned", namespace)
 	return nil
+}
+
+func restartDeployments(ctx context.Context, clientset kubernetes.Interface, namespace string) {
+	deployments, err := clientset.AppsV1().Deployments(namespace).List(ctx, metav1.ListOptions{
+		LabelSelector: reloaderLabel + "=true",
+	})
+	if err != nil {
+		log.Printf("[%s] Error listing deployments for restart: %v", namespace, err)
+		return
+	}
+
+	for _, dep := range deployments.Items {
+		patch := fmt.Sprintf(`{"spec":{"template":{"metadata":{"annotations":{"kubectl.kubernetes.io/restartedAt":"%s"}}}}}`, time.Now().UTC().Format(time.RFC3339))
+		_, err := clientset.AppsV1().Deployments(namespace).Patch(ctx, dep.Name, types.StrategicMergePatchType, []byte(patch), metav1.PatchOptions{})
+		if err != nil {
+			log.Printf("[%s] Error restarting deployment %s: %v", namespace, dep.Name, err)
+			continue
+		}
+		log.Printf("[%s] Restarted deployment %s", namespace, dep.Name)
+	}
 }
 
 func labelNamespaceDone(ctx context.Context, clientset kubernetes.Interface, namespace string, expiresAt time.Time) error {
