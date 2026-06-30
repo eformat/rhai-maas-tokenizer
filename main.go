@@ -2,12 +2,14 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
 	"crypto/tls"
 	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
 	"log"
+	"math/big"
 	"net/http"
 	"os"
 	"os/signal"
@@ -363,41 +365,43 @@ func getMaaSTokenAndModels(ctx context.Context) (string, *maasModelsResponse, er
 		Timeout: 30 * time.Second,
 	}
 
-	tokenBody := strings.NewReader(fmt.Sprintf(`{"expiration": "%s"}`, tokenExpiry))
-	req, err := http.NewRequestWithContext(ctx, "POST", maasHost+"/maas-api/v1/tokens", tokenBody)
+	randSuffix := randomAlphanumeric(8)
+	apiKeyName := "maas-tokenizer-" + randSuffix
+	tokenBody := strings.NewReader(fmt.Sprintf(`{"name": "%s", "description": "%s", "expiresIn": "%s"}`, apiKeyName, apiKeyName, tokenExpiry))
+	req, err := http.NewRequestWithContext(ctx, "POST", maasHost+"/maas-api/v1/api-keys", tokenBody)
 	if err != nil {
-		return "", nil, fmt.Errorf("creating token request: %w", err)
+		return "", nil, fmt.Errorf("creating api-key request: %w", err)
 	}
 	req.Header.Set("Authorization", "Bearer "+maasToken)
 	req.Header.Set("Content-Type", "application/json")
 
 	resp, err := httpClient.Do(req)
 	if err != nil {
-		return "", nil, fmt.Errorf("requesting MaaS token: %w", err)
+		return "", nil, fmt.Errorf("requesting MaaS api-key: %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
 		body, _ := io.ReadAll(resp.Body)
-		return "", nil, fmt.Errorf("MaaS token request failed (status %d): %s", resp.StatusCode, string(body))
+		return "", nil, fmt.Errorf("MaaS api-key request failed (status %d): %s", resp.StatusCode, string(body))
 	}
 
-	var tokenResp struct {
-		Token string `json:"token"`
+	var apiKeyResp struct {
+		Key string `json:"key"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&tokenResp); err != nil {
-		return "", nil, fmt.Errorf("decoding token response: %w", err)
+	if err := json.NewDecoder(resp.Body).Decode(&apiKeyResp); err != nil {
+		return "", nil, fmt.Errorf("decoding api-key response: %w", err)
 	}
-	if tokenResp.Token == "" {
-		return "", nil, fmt.Errorf("empty token in MaaS response")
+	if apiKeyResp.Key == "" {
+		return "", nil, fmt.Errorf("empty key in MaaS api-key response")
 	}
-	log.Printf("Obtained MaaS token (expiry: %s)", tokenExpiry)
+	log.Printf("Obtained MaaS api-key %s (expiry: %s)", apiKeyName, tokenExpiry)
 
 	req, err = http.NewRequestWithContext(ctx, "GET", maasHost+"/maas-api/v1/models", nil)
 	if err != nil {
 		return "", nil, fmt.Errorf("creating models request: %w", err)
 	}
-	req.Header.Set("Authorization", "Bearer "+tokenResp.Token)
+	req.Header.Set("Authorization", "Bearer "+apiKeyResp.Key)
 	req.Header.Set("Content-Type", "application/json")
 
 	modelsResp, err := httpClient.Do(req)
@@ -419,7 +423,17 @@ func getMaaSTokenAndModels(ctx context.Context) (string, *maasModelsResponse, er
 		return "", nil, fmt.Errorf("no models available in MaaS response")
 	}
 
-	return tokenResp.Token, &models, nil
+	return apiKeyResp.Key, &models, nil
+}
+
+func randomAlphanumeric(n int) string {
+	const chars = "abcdefghijklmnopqrstuvwxyz0123456789"
+	b := make([]byte, n)
+	for i := range b {
+		idx, _ := rand.Int(rand.Reader, big.NewInt(int64(len(chars))))
+		b[i] = chars[idx.Int64()]
+	}
+	return string(b)
 }
 
 func upsertSecret(ctx context.Context, clientset kubernetes.Interface, namespace, name string, data map[string][]byte, labels map[string]string) error {
