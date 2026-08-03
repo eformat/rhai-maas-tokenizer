@@ -49,7 +49,7 @@ make helm-deploy                 # helm upgrade --install maas-tokenizer ./chart
 ```yaml
 maasUrl: ""                      # Required — MaaS API base URL
 maasToken: ""                    # Required — OpenShift SA bearer token
-tokenExpiry: "8h"                # MaaS token expiration
+tokenExpiry: "24h"               # MaaS token expiration
 reconcileFrequency: "10m"        # Reconciliation interval
 ```
 
